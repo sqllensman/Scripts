@@ -1,0 +1,343 @@
+Add-Type -TypeDefinition @"
+using System;
+using Microsoft.Win32.SafeHandles;
+using System.IO;
+using System.Runtime.InteropServices;
+ 
+public class GetDisk
+{
+ private const uint IoctlVolumeGetVolumeDiskExtents = 0x560000;
+ 
+ [StructLayout(LayoutKind.Sequential)]
+ public struct DiskExtent
+ {
+ public int DiskNumber;
+ public Int64 StartingOffset;
+ public Int64 ExtentLength;
+ }
+ 
+ [StructLayout(LayoutKind.Sequential)]
+ public struct DiskExtents
+ {
+ public int numberOfExtents;
+ public DiskExtent first;
+ }
+ 
+ [DllImport("Kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+ private static extern SafeFileHandle CreateFile(
+ string lpFileName,
+ [MarshalAs(UnmanagedType.U4)] FileAccess dwDesiredAccess,
+ [MarshalAs(UnmanagedType.U4)] FileShare dwShareMode,
+ IntPtr lpSecurityAttributes,
+ [MarshalAs(UnmanagedType.U4)] FileMode dwCreationDisposition,
+ [MarshalAs(UnmanagedType.U4)] FileAttributes dwFlagsAndAttributes,
+ IntPtr hTemplateFile);
+ 
+ [DllImport("Kernel32.dll", SetLastError = false, CharSet = CharSet.Auto)]
+ private static extern bool DeviceIoControl(
+ SafeFileHandle hDevice,
+ uint IoControlCode,
+ [MarshalAs(UnmanagedType.AsAny)] [In] object InBuffer,
+ uint nInBufferSize,
+ ref DiskExtents OutBuffer,
+ int nOutBufferSize,
+ ref uint pBytesReturned,
+ IntPtr Overlapped
+);
+ 
+ public static string GetPhysicalDriveString(string path)
+ {
+ //clean path up
+ path = path.TrimEnd('\\');
+ if (!path.StartsWith(@"\\.\"))
+ path = @"\\.\" + path;
+ 
+ SafeFileHandle shwnd = CreateFile(path, FileAccess.Read, FileShare.Read | FileShare.Write, IntPtr.Zero, FileMode.Open, 0,
+ IntPtr.Zero);
+ if (shwnd.IsInvalid)
+ {
+ //Marshal.ThrowExceptionForHR(Marshal.GetLastWin32Error());
+ Exception e = Marshal.GetExceptionForHR(Marshal.GetLastWin32Error());
+ }
+ 
+ var bytesReturned = new uint();
+ var de1 = new DiskExtents();
+ bool result = DeviceIoControl(shwnd, IoctlVolumeGetVolumeDiskExtents, IntPtr.Zero, 0, ref de1,
+ Marshal.SizeOf(de1), ref bytesReturned, IntPtr.Zero);
+ shwnd.Close();
+ if(result)
+ return @"\\.\PhysicalDrive" + de1.first.DiskNumber;
+ return null;
+ }
+}
+ 
+"@
+
+Import-Module dbatools
+
+$ComputerName = $env:COMPUTERNAME
+
+$Lookup_iSCSI = $false
+$Cluster = 'MASSQLDEV-CL2'
+
+$MonitorServer = 'MASSPRDCL3-AG2L'
+$MonitorDB = 'DBA_Reports'
+$ReadingDate = Get-Date
+
+
+#Win32_DiskDrive
+$Disks = Get-WmiObject -Class Win32_DiskDrive -ComputerName $ComputerName
+$InputObject = $Disks | Select @{Name="ComputerName";expression={$ComputerName}}, @{Name="ReadingDate";expression={$ReadingDate}},Status, DeviceID, Partitions,  Index, InterfaceType, @{Name="Size_GB";expression={[math]::round(($_.Size/ 1073741824),2)}}, Caption, Description, MediaType, Model, Name, PNPDeviceID, SCSILogicalUnit, SCSIPort, SCSITargetID, SerialNumber
+
+# Send to Staging Table
+$SqlDelete = "Delete from Stage.Win32_DiskDrive WHERE ComputerName = '$ComputerName'"
+Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $InputObject -Schema 'Stage' -Table 'Win32_DiskDrive'
+
+#Win32_DiskDriveToDiskPartition
+$DriveToDiskPartition = Get-WmiObject -Class Win32_DiskDriveToDiskPartition -ComputerName $ComputerName
+$InputObject = $DriveToDiskPartition | Select @{Name="ComputerName";expression={$ComputerName}}, @{Name="ReadingDate";expression={$ReadingDate}}, Antecedent, Dependent
+
+# Send to Staging Table
+$SqlDelete = "Delete from Stage.Win32_DiskDriveToDiskPartition WHERE ComputerName = '$ComputerName'"
+Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $InputObject -Schema 'Stage' -Table 'Win32_DiskDriveToDiskPartition'
+
+#Win32_LogicalDisk
+$LogicalDisk = Get-WmiObject -Class Win32_LogicalDisk -ComputerName $ComputerName -Filter "DriveType='3'"
+$InputObject = $LogicalDisk | Select @{Name="ComputerName";expression={$ComputerName}}, @{Name="ReadingDate";expression={$ReadingDate}}, DeviceID, Caption, Description, DriveType, FileSystem, Name, @{Name="Size_GB";expression={[math]::round(($_.Size/ 1073741824),2)}}, VolumeName, VolumeSerialNumber
+
+# Send to Staging Table
+$SqlDelete = "Delete from Stage.Win32_LogicalDisk WHERE ComputerName = '$ComputerName'"
+Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $InputObject -Schema 'Stage' -Table 'Win32_LogicalDisk'
+
+# Win32_LogicalDiskToPartition
+$LogicalDiskToPartition = Get-WmiObject -Class Win32_LogicalDiskToPartition -ComputerName $ComputerName
+$InputObject = $LogicalDiskToPartition | Select @{Name="ComputerName";expression={$ComputerName}}, @{Name="ReadingDate";expression={$ReadingDate}}, Antecedent, Dependent, StartingAddress, EndingAddress
+
+# Send to Staging Table
+$SqlDelete = "Delete from Stage.Win32_LogicalDiskToPartition WHERE ComputerName = '$ComputerName'"
+Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $InputObject -Schema 'Stage' -Table 'Win32_LogicalDiskToPartition'
+
+#Win32_Volume
+$LogicalVolume = Get-WmiObject  -Class Win32_Volume  -ComputerName $ComputerName -Filter "DriveType='3'" 
+$InputObject = $LogicalVolume | Select @{Name="ComputerName";expression={$ComputerName}}, @{Name="ReadingDate";expression={$ReadingDate}}, Caption, DeviceID, Label, Name, SerialNumber, @{Name="Size_GB";expression={[math]::round(($_.Capacity/ 1073741824),2)}}
+
+# Send to Staging Table
+$SqlDelete = "Delete from Stage.Win32_Volume WHERE ComputerName = '$ComputerName'"
+Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $InputObject -Schema 'Stage' -Table 'Win32_Volume'
+
+#Win32_MountPoint
+$InputObject = @()
+$MountPoints = Get-WmiObject  -Class Win32_MountPoint  -ComputerName $ComputerName
+
+foreach($md in $MountPoints) {
+    $volId = $md.Volume.Substring(30, 44)
+    $PhysicalDrive = [GetDisk]::GetPhysicalDriveString($volId)
+
+    $mpData = [PSCustomObject]@{
+        ComputerName = $ComputerName
+        ReadingDate = $ReadingDate
+        Directory = $md.Directory
+        Volume    = $md.Volume
+        PhysicalDrive = $PhysicalDrive
+    }
+    $InputObject+=$mpData
+}
+
+# Send to Staging Table
+$SqlDelete = "Delete from Stage.Win32_MountPoint WHERE ComputerName = '$ComputerName'"
+Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $InputObject -Schema 'Stage' -Table 'Win32_MountPoint'
+
+# Local Disk Info
+$DiskInfo = @()
+$Disks = Get-Disk 
+foreach($disk in $Disks) {
+    $disk.DiskNumber
+
+    $InitiatorNodeAddress = ''
+    $InitiatorSideIdentifier = ''
+    $SessionIdentifier = ''
+    $TargetNodeAddress = ''
+
+    if($disk.BusType -Eq "iSCSI" -and $disk.Number -gt 0 -and $Lookup_iSCSI) {
+        $IscsiSession = Get-IscsiSession -Disk $disk  
+        if ($IscsiSession) {
+            $InitiatorNodeAddress = $IscsiSession.InitiatorNodeAddress
+            $InitiatorSideIdentifier = $IscsiSession.InitiatorSideIdentifier
+            $SessionIdentifier = $IscsiSession.SessionIdentifier
+            $TargetNodeAddress = $IscsiSession.TargetNodeAddress 
+        }
+    } 
+       
+    $MappedPartitions = $disk | Get-Partition  | Where-Object Type -eq "Basic"
+
+    foreach($partition in $MappedPartitions) {
+
+        $MappedVolumes = $partition | Get-Volume
+
+        foreach($volume in $MappedVolumes) {        
+        
+            $diskData = [PSCustomObject]@{
+                ComputerName = $ComputerName
+                ReadingDate = $ReadingDate
+                DiskNumber = $disk.DiskNumber
+                PartitionStyle = $disk.PartitionStyle
+                ProvisioningType = $disk.ProvisioningType
+                OperationalStatus = $disk.OperationalStatus
+                HealthStatus = $disk.HealthStatus
+                BusType = $disk.BusType
+                OfflineReason  = $disk.OfflineReason
+                ObjectId = $disk.ObjectId
+                UniqueId = $disk.UniqueId
+                AllocatedSize = $disk.AllocatedSize
+                FriendlyName = $disk.FriendlyName
+                Guid = $disk.Guid
+                IsClustered = $disk.IsClustered
+                IsHighlyAvailable = $disk.IsHighlyAvailable
+                IsOffline = $disk.IsOffline
+                Location = $disk.Location
+                Manufacturer = $disk.Manufacturer     
+                Number = $disk.Number
+                NumberOfPartitions = $disk.NumberOfPartitions
+                Path = $disk.Path
+                SerialNumber = $disk.SerialNumber
+                Size = $disk.Size
+                InitiatorNodeAddress = $InitiatorNodeAddress
+                InitiatorSideIdentifier = $InitiatorSideIdentifier
+                SessionIdentifier = $SessionIdentifier
+                TargetNodeAddress = $TargetNodeAddress
+                PartitionNumber = $partition.PartitionNumber
+                DriveLetter = $partition.DriveLetter 
+                Offset = $partition.Offset                                                                                 
+                PartitionSize = $partition.Size 
+                DeviceId = $partition.Guid
+                AccessPaths = $partition.AccessPaths 
+                NoDefaultDriveLetter = $partition.NoDefaultDriveLetter                
+                VolumeDriveLetter = $volume.DriveLetter          
+                FileSystem = $volume.FileSystem
+                FileSystemLabel = $volume.FileSystemLabel
+                VolumePath = $volume.Path
+                VolumeSize = $volume.Size
+                VolumeSizeRemaining = $volume.SizeRemaining
+            }
+
+            $DiskInfo+= $diskData
+        }
+    }
+    
+}
+
+
+#$DiskInfo | Out-GridView
+# Send to Staging Table
+$SqlDelete = "Delete from Stage.LocalDiskInfo WHERE ComputerName = '$ComputerName'"
+
+Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $DiskInfo -Schema 'Stage' -Table 'LocalDiskInfo'
+
+# Get Cluster Information if required
+if($null -ne $Cluster ) {
+    Import-Module FailoverClusters 
+
+    # Clear Staging Tables
+    $SqlDelete = "Delete from Stage.ClusterDisk1 WHERE Cluster = '$Cluster'"
+    Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+
+    $SqlDelete = "Delete from Stage.ClusterDisk2 WHERE Cluster = '$Cluster'"
+    Invoke-DbaQuery -SqlInstance  $MonitorServer -Database $MonitorDB -Query $SqlDelete
+
+    $DiskInfo = @() 
+    $Disks    = Get-ClusterResource -Cluster $cluster | Where-Object {$_.ResourceType -eq "Physical Disk" } 
+    $svDisks  = Get-ClusterSharedVolume -Cluster $cluster | Select *
+
+
+    foreach($disk in $Disks) {
+        $DiskIdGuid = $disk | Get-ClusterParameter -Name DiskIdGuid
+        $DiskGuid = $disk | Get-ClusterParameter -Name DiskGuid
+        $DiskPath = $disk | Get-ClusterParameter -Name DiskPath
+        
+        $diskData = [PSCustomObject]@{
+            Cluster = $disk.Cluster
+            Id = $disk.Id
+            Name = $disk.Name
+            OwnerNode = $disk.OwnerNode
+            OwnerGroup = $disk.OwnerGroup
+            State = $disk.State
+            DiskIdGuid = $DiskIdGuid.Value
+            DiskGuid = $DiskGuid.Value
+            DiskPath = $DiskPath.Value
+            IsClusterSharedVolume = 0
+        }
+        $DiskInfo+= $diskData
+    }
+
+
+    foreach($disk in $svDisks) {
+        $DiskPath = $disk.SharedVolumeInfo.FriendlyVolumeName
+        
+        $diskData = [PSCustomObject]@{
+            Cluster = $cluster
+            Id = $disk.Id
+            Name = $disk.Name
+            OwnerNode = $disk.OwnerNode
+            OwnerGroup = $disk.OwnerGroup
+            State = $disk.State
+            DiskIdGuid = $null
+            DiskGuid = $null
+            DiskPath = $DiskPath
+            IsClusterSharedVolume = 1
+        }
+        $DiskInfo+= $diskData
+    }
+
+
+    Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $DiskInfo -Schema 'Stage' -Table 'ClusterDisk1' -AutoCreateTable
+
+    $Disks = Get-CimInstance -Namespace Root\MSCluster -ClassName MSCluster_Resource -ComputerName $Cluster | ?{$_.Type -eq 'Physical Disk'}
+
+    $DiskInfo = @()
+    foreach($disk in $Disks) {
+
+        $DiskPartition = Get-CimAssociatedInstance -InputObject $disk  -ResultClassName MSCluster_DiskPartition
+        switch ($disk.State) { 
+            -1 { $diskstate = "Unknown"} 
+		    0   { $diskstate = "Inherited"} 
+		    1   { $diskstate = "Initializing"} 
+		    2   { $diskstate = "Online"} 
+		    3   { $diskstate = "Offline"} 
+		    4   { $diskstate = "Failed"} 
+		    128 { $diskstate = "Pending"}
+		    129 { $diskstate = "Online Pending"} 
+		    130 { $diskstate = "Offline Pending"} 
+        }
+
+        $diskData = [PSCustomObject]@{
+            Cluster = $Cluster
+            Name = $disk.Name
+            Id = $disk.Id
+            IsClusterSharedVolume = $disk.IsClusterSharedVolume
+            OwnerGroup = $disk.OwnerGroup
+            OwnerNode = $disk.OwnerNode
+            State = $disk.State        
+            FileSystem = $DiskPartition.FileSystem
+            FreeSpace = $DiskPartition.FreeSpace
+            MountPoints = $DiskPartition.MountPoints
+            PartitionNumber = $DiskPartition.PartitionNumber
+            Path = $DiskPartition.Path
+            SerialNumber = $DiskPartition.SerialNumber
+            TotalSize = $DiskPartition.TotalSize
+            VolumeGuid = $DiskPartition.VolumeGuid
+            VolumeLabel = $DiskPartition.VolumeLabel
+        }
+        $DiskInfo+= $diskData
+    }
+
+    Write-DbaDataTable -SqlInstance  $MonitorServer -Database $MonitorDB -InputObject $DiskInfo -Schema 'Stage' -Table 'ClusterDisk2' -AutoCreateTable
+
+
+}
