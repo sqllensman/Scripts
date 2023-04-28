@@ -1,7 +1,7 @@
 using namespace System.Management.Automation
 using namespace System.Management.Automation.Language
 
-[System.Environment]::SetEnvironmentVariable('OpenAIKey','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')
+[System.Environment]::SetEnvironmentVariable('OpenAIKey','')
 # actifio
 [System.Environment]::SetEnvironmentVariable('actifio_host','10.1.166.104')
 [System.Environment]::SetEnvironmentVariable('actifio_user','sqlbackup')
